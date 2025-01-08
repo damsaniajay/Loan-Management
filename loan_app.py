@@ -4,7 +4,78 @@ from datetime import datetime, date
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import hashlib
+import os
 
+# Authentication functions
+def init_auth_db():
+    conn = sqlite3.connect('farmer_loans.db')
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def create_default_admin():
+    conn = sqlite3.connect('farmer_loans.db')
+    c = conn.cursor()
+    # Check if admin exists
+    c.execute('SELECT * FROM users WHERE username = ?', ('admin',))
+    if not c.fetchone():
+        # Create default admin with password 'admin123'
+        password_hash = hash_password('admin123')
+        c.execute('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)',
+                 ('admin', password_hash, 'admin'))
+        conn.commit()
+    conn.close()
+
+def verify_user(username, password):
+    conn = sqlite3.connect('farmer_loans.db')
+    c = conn.cursor()
+    c.execute('SELECT password_hash, role FROM users WHERE username = ?', (username,))
+    result = c.fetchone()
+    conn.close()
+    
+    if result and result[0] == hash_password(password):
+        return True, result[1]
+    return False, None
+
+def login_form():
+    st.sidebar.subheader("Login")
+    username = st.sidebar.text_input("Username")
+    password = st.sidebar.text_input("Password", type="password")
+    
+    if st.sidebar.button("Login"):
+        authenticated, role = verify_user(username, password)
+        if authenticated:
+            st.session_state['authenticated'] = True
+            st.session_state['username'] = username
+            st.session_state['role'] = role
+            st.sidebar.success(f"Logged in as {username}")
+            st.experimental_rerun()
+        else:
+            st.sidebar.error("Invalid username or password")
+
+def logout():
+    if st.sidebar.button("Logout"):
+        for key in ['authenticated', 'username', 'role']:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.experimental_rerun()
+
+def check_authentication():
+    return st.session_state.get('authenticated', False)
+
+# Database functions
 def init_db():
     conn = sqlite3.connect('farmer_loans.db')
     c = conn.cursor()
@@ -158,6 +229,11 @@ def main():
         initial_sidebar_state="expanded"
     )
     
+    # Initialize databases
+    init_db()
+    init_auth_db()
+    create_default_admin()
+    
     st.markdown("""
         <style>
         .main {
@@ -178,16 +254,27 @@ def main():
     
     st.title("🌾 Farmer Loan Management System")
     
-    init_db()
+    # Authentication UI
+    if not check_authentication():
+        login_form()
+        st.warning("Please login to access the system")
+        return
+    else:
+        st.sidebar.success(f"Logged in as {st.session_state['username']}")
+        logout()
     
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", [
+    available_pages = [
         "Dashboard",
         "Add New Loan",
-        "Manage Loans",
         "Loan History",
         "Analytics"
-    ])
+    ]
+    
+    if check_authentication():
+        available_pages.insert(2, "Manage Loans")
+    
+    page = st.sidebar.radio("Go to", available_pages)
     
     if page == "Dashboard":
         st.header("📊 Dashboard")
@@ -293,8 +380,11 @@ def main():
                         st.balloons()
     
     elif page == "Manage Loans":
+        if not check_authentication():
+            st.error("Please login to access this page")
+            return
+            
         st.header("📝 Manage Loans")
-        
         loans_df = get_all_loans()
         
         if not loans_df.empty:
@@ -351,35 +441,38 @@ def main():
             
             st.subheader("Loan Actions")
             
-            tab1, tab2 = st.tabs(["Update Loan", "Delete Loan"])
-            
-            with tab1:
-                col1, col2 = st.columns(2)
-                with col1:
-                    loan_id = st.selectbox("Select Loan to Update",
-                                         loans_df['id'].tolist(),
-                                         format_func=lambda x: f"Loan #{x} - {loans_df[loans_df['id'] == x]['farmer_name'].iloc[0]}")
-                    new_end_date = st.date_input("New End Date")
-                with col2:
-                    update_reason = st.text_area("Reason for Update")
-                    if st.button("Update End Date", use_container_width=True):
-                        if update_loan_end_date(loan_id, new_end_date, update_reason):
-                            st.success("Loan end date updated successfully!")
-                            st.experimental_rerun()
-            
-            with tab2:
-                col1, col2 = st.columns(2)
-                with col1:
-                    delete_loan_id = st.selectbox("Select Loan to Delete",
-                                                loans_df['id'].tolist(),
-                                                format_func=lambda x: f"Loan #{x} - {loans_df[loans_df['id'] == x]['farmer_name'].iloc[0]}",
-                                                key="delete_loan")
-                with col2:
-                    delete_reason = st.text_area("Reason for Deletion")
-                    if st.button("Delete Loan", use_container_width=True):
-                        if delete_loan(delete_loan_id, delete_reason):
-                            st.success("Loan deleted successfully!")
-                            st.experimental_rerun()
+            if st.session_state.get('role') == 'admin':
+                tab1, tab2 = st.tabs(["Update Loan", "Delete Loan"])
+                
+                with tab1:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        loan_id = st.selectbox("Select Loan to Update",
+                                             loans_df['id'].tolist(),
+                                             format_func=lambda x: f"Loan #{x} - {loans_df[loans_df['id'] == x]['farmer_name'].iloc[0]}")
+                        new_end_date = st.date_input("New End Date")
+                    with col2:
+                        update_reason = st.text_area("Reason for Update")
+                        if st.button("Update End Date", use_container_width=True):
+                            if update_loan_end_date(loan_id, new_end_date, update_reason):
+                                st.success("Loan end date updated successfully!")
+                                st.experimental_rerun()
+                
+                with tab2:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        delete_loan_id = st.selectbox("Select Loan to Delete",
+                                                    loans_df['id'].tolist(),
+                                                    format_func=lambda x: f"Loan #{x} - {loans_df[loans_df['id'] == x]['farmer_name'].iloc[0]}",
+                                                    key="delete_loan")
+                    with col2:
+                        delete_reason = st.text_area("Reason for Deletion")
+                        if st.button("Delete Loan", use_container_width=True):
+                            if delete_loan(delete_loan_id, delete_reason):
+                                st.success("Loan deleted successfully!")
+                                st.experimental_rerun()
+            else:
+                st.warning("You need admin privileges to modify loans")
         else:
             st.info("No active loans to manage.")
     
@@ -511,7 +604,7 @@ def main():
                 'loan_amount': 'sum',
                 'current_interest': 'sum',
                 'total_amount': 'sum',
-                'father_name': 'first'  # Include father's name in analysis
+                'father_name': 'first'
             }).reset_index()
             
             # Display farmer-wise table
